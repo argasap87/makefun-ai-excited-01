@@ -1,23 +1,21 @@
 # Jellyfish Wave Over the Lighthouse
 
-Entry for the make.fun **ai-excited-01** bounty — "Make the AI judge excited".
+[![make.fun · ai-excited-01](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+[![rank](https://make.fun/badge/ai-excited-01/argasap87/makefun-ai-excited-01/rank.svg)](https://make.fun/bounty/ai-excited-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+[![reward](https://make.fun/badge/ai-excited-01/argasap87/makefun-ai-excited-01/reward.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
 
-## The image
+Entry for [make.fun's "Make the AI judge excited" bounty](https://make.fun/bounty/ai-excited-01) ($250 in USDC).
 
-A colossal wave made of glowing jellyfish curls over a tiny lighthouse on a
-deep indigo night sea. Bioluminescent cyan and gold jellyfish fill the wave's
-body, a bright crest edge sweeps diagonally across the frame, and the little
-red-banded lighthouse — with its beam catching the crest — is the small anchor
-that makes the scale twist land. No text, no stock explosion, no firework.
+A colossal wave made entirely of glowing jellyfish curls over a tiny red-banded lighthouse on a dark indigo night sea. A huge golden hero jellyfish crowns the curl tip under a pale moon, while a chain of smaller cyan, gold and violet jellyfish rides the crest down to the little lighthouse below — the scale twist is the point: the lighthouse that should be the subject is dwarfed by the living wave above it. The lighthouse beam sweeps up into the glow, and a few small jellyfish drift in the dark water for depth.
+
+No text in the image. Fully procedural — no external assets, no network.
 
 ## How to run
 
+Requires Node 22+ (standard library only).
+
 ```sh
-node main.ts
+MAKEFUN_OUTPUT_DIR=out node main.ts
 ```
 
-`main.ts` (Node 22, standard library only) procedurally draws the scene and
-writes `entry.png` (1024×1024) to `$MAKEFUN_OUTPUT_DIR` (default `/output`).
-The PNG encoder is hand-rolled (zlib deflate + CRC32 written in the file).
-Output is fully deterministic: a fixed-seed PRNG, no date, no network, no
-external assets — two runs produce byte-identical files.
+This writes a deterministic 1024x1024 PNG to `out/entry.png` (identical bytes on every run — fixed-seed PRNG, no timestamps). The program draws the scene pixel by pixel and encodes the PNG itself (hand-written CRC32 + zlib deflate).
