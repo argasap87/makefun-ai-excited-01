@@ -365,6 +365,50 @@ for (let i = 0; i < 320; i++) {
   }
 }
 
+// Beam-burst: high-energy particle bursts where the lighthouse beam
+// intercepts the wave (beam crosses the band around x 560-650, y 570-650).
+// A bright impact glow, radiating streaks, and dense spark spray.
+{
+  const bcx = 602;
+  const bcy = 612;
+  disc(bcx, bcy, 90, 255, 226, 150, 0.16);
+  disc(bcx, bcy, 55, 255, 240, 200, 0.28);
+  disc(bcx, bcy, 26, 255, 250, 230, 0.55);
+  // Radiating streaks.
+  for (let i = 0; i < 26; i++) {
+    const a = rnd() * Math.PI * 2;
+    const len = 14 + rnd() * 34;
+    const sx = bcx + Math.cos(a) * (8 + rnd() * 20);
+    const sy = bcy + Math.sin(a) * (8 + rnd() * 20);
+    const ex = sx + Math.cos(a) * len;
+    const ey = sy + Math.sin(a) * len;
+    const gold = rnd() < 0.55;
+    stroke([[sx, sy], [ex, ey]], 1.5 + rnd() * 1.5, gold ? 255 : 170, gold ? 214 : 238, gold ? 130 : 255, 0.55 + rnd() * 0.35);
+  }
+  // Dense spark spray around the impact point.
+  for (let i = 0; i < 130; i++) {
+    const a = rnd() * Math.PI * 2;
+    const rr = Math.pow(rnd(), 0.6) * 105;
+    const x = bcx + Math.cos(a) * rr * 1.25;
+    const y = bcy + Math.sin(a) * rr * 0.8;
+    const gold = rnd() < 0.4;
+    const rad = 1 + rnd() * 3.2;
+    disc(x, y, rad, gold ? 255 : 180, gold ? 216 : 240, gold ? 140 : 255, 0.5 + rnd() * 0.45);
+    if (rnd() < 0.22) disc(x, y, rad * 3, gold ? 255 : 180, gold ? 216 : 240, 255, 0.18);
+  }
+  // A few starbursts: bright core + cross flare.
+  for (let i = 0; i < 6; i++) {
+    const a = rnd() * Math.PI * 2;
+    const rr = 15 + rnd() * 70;
+    const x = bcx + Math.cos(a) * rr;
+    const y = bcy + Math.sin(a) * rr * 0.8;
+    const s = 6 + rnd() * 8;
+    disc(x, y, 3.5, 255, 250, 230, 0.95);
+    stroke([[x - s, y], [x + s, y]], 1.6, 255, 244, 210, 0.7);
+    stroke([[x, y - s], [x, y + s]], 1.6, 255, 244, 210, 0.7);
+  }
+}
+
 // Rocks.
 {
   const rockPts: Array<[number, number]> = [
