@@ -1,619 +1,537 @@
-/**
- * Jellyfish Wave Over the Lighthouse — make.fun ai-excited-01
- *
- * A colossal wave made of glowing jellyfish curls over a tiny lighthouse.
- * Procedurally drawn, Node 22 standard library only, fully deterministic
- * (fixed-seed PRNG, no Date, no network, no external assets).
- * Writes one 1024x1024 PNG to $MAKEFUN_OUTPUT_DIR/entry.png.
- */
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as zlib from "node:zlib";
+// ai-excited-01 — "Jellyfish Wave Over the Lighthouse"
+// Procedural PNG renderer. Node 22 stdlib only, no network, no external
+// assets, fully deterministic (fixed-seed PRNG). Writes one 1024x1024 PNG
+// to $MAKEFUN_OUTPUT_DIR/entry.png (default /output).
+//
+// Concept: a colossal wave made of glowing jellyfish curls over a tiny
+// lighthouse. Deep indigo night sea, bioluminescent cyan and gold
+// jellyfish, one strong diagonal crest, one hero gold jellyfish at the
+// curl tip, a pale moon above, a tiny red-banded lighthouse as the small
+// anchor that makes the scale twist land. No text in the image.
+
+import { deflateSync } from "node:zlib";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const W = 1024;
 const H = 1024;
 
-type RGB = [number, number, number];
-
-// ---------- deterministic PRNG (mulberry32, fixed seed) ----------
+// ---------------------------------------------------------------------------
+// Fixed-seed PRNG (mulberry32) — deterministic output, no Date/random.
+// ---------------------------------------------------------------------------
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
-  return function (): number {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const rand = mulberry32(20261116);
-function rr(lo: number, hi: number): number {
-  return lo + (hi - lo) * rand();
-}
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(rand() * arr.length)];
+const rnd = mulberry32(20261116);
+
+const clamp = (v: number, lo: number, hi: number): number =>
+  v < lo ? lo : v > hi ? hi : v;
+const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+const smoothstep = (e0: number, e1: number, x: number): number => {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+
+// ---------------------------------------------------------------------------
+// Pixel buffer + blending helpers (source-over).
+// ---------------------------------------------------------------------------
+const buf = new Uint8ClampedArray(W * H * 4);
+
+function blendPx(x: number, y: number, r: number, g: number, b: number, a: number): void {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  if (ix < 0 || iy < 0 || ix >= W || iy >= H || a <= 0) return;
+  const i = (iy * W + ix) * 4;
+  const inv = 1 - a;
+  buf[i] = Math.round(r * a + buf[i] * inv);
+  buf[i + 1] = Math.round(g * a + buf[i + 1] * inv);
+  buf[i + 2] = Math.round(b * a + buf[i + 2] * inv);
+  buf[i + 3] = 255;
 }
 
-// ---------- image buffer (opaque RGBA) ----------
-const img = new Uint8Array(W * H * 4);
-
-function clamp(v: number, lo: number, hi: number): number {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-function mix(c0: RGB, c1: RGB, t: number): RGB {
-  return [lerp(c0[0], c1[0], t), lerp(c0[1], c1[1], t), lerp(c0[2], c1[2], t)];
-}
-
-// Alpha-blend a color onto pixel (x, y). Final image stays opaque.
-function px(x: number, y: number, r: number, g: number, b: number, a: number): void {
-  const xi = Math.round(x);
-  const yi = Math.round(y);
-  if (xi < 0 || yi < 0 || xi >= W || yi >= H || a <= 0) return;
-  if (a > 1) a = 1;
-  const i = (yi * W + xi) * 4;
-  const ia = 1 - a;
-  img[i] = r * a + img[i] * ia;
-  img[i + 1] = g * a + img[i + 1] * ia;
-  img[i + 2] = b * a + img[i + 2] * ia;
-  img[i + 3] = 255;
-}
-
-// Soft radial disc, quadratic falloff.
-function disc(cx: number, cy: number, r: number, c: RGB, a: number): void {
-  if (r <= 0) return;
-  const x0 = Math.max(0, Math.floor(cx - r));
-  const x1 = Math.min(W - 1, Math.ceil(cx + r));
-  const y0 = Math.max(0, Math.floor(cy - r));
-  const y1 = Math.min(H - 1, Math.ceil(cy + r));
+// Soft-edged filled circle.
+function disc(cx: number, cy: number, rad: number, r: number, g: number, b: number, a: number): void {
+  if (rad <= 0 || a <= 0) return;
+  const x0 = Math.max(0, Math.floor(cx - rad - 1));
+  const x1 = Math.min(W - 1, Math.ceil(cx + rad + 1));
+  const y0 = Math.max(0, Math.floor(cy - rad - 1));
+  const y1 = Math.min(H - 1, Math.ceil(cy + rad + 1));
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
-      const dx = (x - cx) / r;
-      const dy = (y - cy) / r;
-      const d2 = dx * dx + dy * dy;
-      if (d2 >= 1) continue;
-      px(x, y, c[0], c[1], c[2], a * (1 - d2));
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      const d = Math.sqrt(dx * dx + dy * dy) / rad;
+      if (d >= 1) continue;
+      const fall = d > 0.85 ? (1 - d) / 0.15 : 1;
+      blendPx(x, y, r, g, b, a * fall);
     }
   }
 }
 
-// Ellipse with radial falloff; power < 1 gives a harder edge, > 1 softer.
-function ellipse(cx: number, cy: number, rx: number, ry: number, c: RGB, a: number, power: number): void {
-  if (rx <= 0 || ry <= 0) return;
-  const x0 = Math.max(0, Math.floor(cx - rx));
-  const x1 = Math.min(W - 1, Math.ceil(cx + rx));
-  const y0 = Math.max(0, Math.floor(cy - ry));
-  const y1 = Math.min(H - 1, Math.ceil(cy + ry));
+// Soft-edged filled ellipse.
+function ellipse(cx: number, cy: number, rx: number, ry: number, r: number, g: number, b: number, a: number): void {
+  if (rx <= 0 || ry <= 0 || a <= 0) return;
+  const x0 = Math.max(0, Math.floor(cx - rx - 1));
+  const x1 = Math.min(W - 1, Math.ceil(cx + rx + 1));
+  const y0 = Math.max(0, Math.floor(cy - ry - 1));
+  const y1 = Math.min(H - 1, Math.ceil(cy + ry + 1));
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
-      const dx = (x - cx) / rx;
-      const dy = (y - cy) / ry;
-      const d2 = dx * dx + dy * dy;
-      if (d2 >= 1) continue;
-      px(x, y, c[0], c[1], c[2], a * Math.pow(1 - d2, power));
+      const dx = (x + 0.5 - cx) / rx;
+      const dy = (y + 0.5 - cy) / ry;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d >= 1) continue;
+      const fall = d > 0.85 ? (1 - d) / 0.15 : 1;
+      blendPx(x, y, r, g, b, a * fall);
     }
   }
 }
 
-// Thick line with round caps, drawn as a chain of discs.
-function stroke(x0: number, y0: number, x1: number, y1: number, w: number, c: RGB, a: number): void {
-  const len = Math.hypot(x1 - x0, y1 - y0);
-  const steps = Math.max(1, Math.ceil(len / Math.max(1, w * 0.45)));
-  for (let s = 0; s <= steps; s++) {
-    const t = s / steps;
-    disc(lerp(x0, x1, t), lerp(y0, y1, t), w / 2, c, a);
+// Thick polyline drawn as a chain of small discs.
+function stroke(pts: Array<[number, number]>, width: number, r: number, g: number, b: number, a: number): void {
+  for (let s = 0; s < pts.length - 1; s++) {
+    const [x0, y0] = pts[s];
+    const [x1, y1] = pts[s + 1];
+    const dist = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.max(1, Math.ceil(dist / Math.max(1, width * 0.5)));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      disc(lerp(x0, x1, t), lerp(y0, y1, t), width / 2, r, g, b, a);
+    }
   }
 }
 
-type Pt = [number, number];
-
-// Cubic bezier point.
-function cubic(p0: Pt, p1: Pt, p2: Pt, p3: Pt, t: number): Pt {
-  const u = 1 - t;
-  const x =
-    u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0];
-  const y =
-    u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1];
-  return [x, y];
-}
-
-// Cubic bezier tangent (unnormalised).
-function cubicTan(p0: Pt, p1: Pt, p2: Pt, p3: Pt, t: number): Pt {
-  const u = 1 - t;
-  const x =
-    3 * u * u * (p1[0] - p0[0]) + 6 * u * t * (p2[0] - p1[0]) + 3 * t * t * (p3[0] - p2[0]);
-  const y =
-    3 * u * u * (p1[1] - p0[1]) + 6 * u * t * (p2[1] - p1[1]) + 3 * t * t * (p3[1] - p2[1]);
-  return [x, y];
-}
-
-// Stroke a cubic bezier with a width tapering from w0 to w1.
-// Steps adapt to the curve length so the stroke stays smooth, never dotted.
-function bezierStroke(p0: Pt, p1: Pt, p2: Pt, p3: Pt, w0: number, w1: number, c: RGB, a: number): void {
-  const approxLen =
-    Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) +
-    Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) +
-    Math.hypot(p3[0] - p2[0], p3[1] - p2[1]);
-  const minW = Math.max(1, Math.min(w0, w1));
-  const steps = Math.max(12, Math.ceil(approxLen / (minW * 0.35)));
-  for (let s = 0; s <= steps; s++) {
-    const t = s / steps;
-    const [x, y] = cubic(p0, p1, p2, p3, t);
-    disc(x, y, lerp(w0, w1, t) / 2, c, a);
+// Filled vertical gradient rectangle.
+function vgrad(x0: number, y0: number, x1: number, y1: number,
+  top: [number, number, number], bot: [number, number, number]): void {
+  const h = Math.max(1, y1 - y0);
+  for (let y = Math.max(0, Math.floor(y0)); y < Math.min(H, Math.ceil(y1)); y++) {
+    const t = (y - y0) / h;
+    const r = lerp(top[0], bot[0], t);
+    const g = lerp(top[1], bot[1], t);
+    const b = lerp(top[2], bot[2], t);
+    for (let x = Math.max(0, Math.floor(x0)); x < Math.min(W, Math.ceil(x1)); x++) {
+      const i = (y * W + x) * 4;
+      buf[i] = Math.round(r);
+      buf[i + 1] = Math.round(g);
+      buf[i + 2] = Math.round(b);
+      buf[i + 3] = 255;
+    }
   }
 }
 
-// Scanline polygon fill.
-function fillPoly(pts: Pt[], c: RGB, a: number): void {
-  let minY = H - 1;
-  let maxY = 0;
-  for (const p of pts) {
-    minY = Math.min(minY, Math.floor(p[1]));
-    maxY = Math.max(maxY, Math.ceil(p[1]));
+// ---------------------------------------------------------------------------
+// Scene geometry: the wave crest as a function of x.
+// The crest sweeps diagonally from lower-left up to the upper-right, then
+// curls over near the tip.
+// ---------------------------------------------------------------------------
+function crestY(x: number): number {
+  const s = smoothstep(0, 880, x);
+  let y = 660 - 360 * s;
+  // Gentle mid-bow so the crest is a curve, not a straight diagonal.
+  y -= 70 * Math.sin(Math.PI * s);
+  // Curl-over lift near the tip.
+  y += 70 * smoothstep(760, 940, x);
+  return y;
+}
+const BAND = 300; // wave band thickness in px
+
+// ---------------------------------------------------------------------------
+// 1. Sky — deep indigo gradient, stars, pale moon.
+// ---------------------------------------------------------------------------
+vgrad(0, 0, W, H, [7, 12, 38], [10, 26, 58]);
+
+for (let i = 0; i < 220; i++) {
+  const x = rnd() * W;
+  const y = rnd() * 560;
+  const bright = 0.35 + rnd() * 0.65;
+  const size = rnd() < 0.12 ? 2.2 : 1.3;
+  // Keep the moon's disc clear.
+  if (Math.hypot(x - 196, y - 128) < 70) continue;
+  disc(x, y, size, 235 * bright, 240 * bright, 255 * bright, 0.9);
+  if (rnd() < 0.18) disc(x, y, size * 2.6, 190, 210, 255, 0.12);
+}
+
+// Moon: glow halo + pale disc + soft shading (upper-left, clear of the hero).
+disc(196, 128, 96, 214, 208, 176, 0.10);
+disc(196, 128, 66, 224, 220, 192, 0.16);
+disc(196, 128, 46, 246, 242, 224, 1);
+disc(184, 118, 9, 214, 208, 186, 0.55);
+disc(210, 138, 6, 218, 212, 190, 0.5);
+disc(196, 144, 5, 220, 214, 192, 0.45);
+
+// ---------------------------------------------------------------------------
+// 2. Sea — dark gradient below the horizon, with faint shimmer.
+// ---------------------------------------------------------------------------
+vgrad(0, 620, W, H, [11, 42, 68], [3, 12, 26]);
+for (let i = 0; i < 90; i++) {
+  const y = 660 + rnd() * 340;
+  const x = rnd() * W;
+  const len = 20 + rnd() * 90;
+  const a = 0.05 + rnd() * 0.08;
+  for (let k = 0; k < len; k++) {
+    blendPx(x + k, y, 120, 200, 230, a * (1 - k / len));
   }
-  minY = Math.max(0, minY);
-  maxY = Math.min(H - 1, maxY);
-  for (let y = minY; y <= maxY; y++) {
-    const xs: number[] = [];
-    for (let i = 0; i < pts.length; i++) {
-      const p0 = pts[i];
-      const p1 = pts[(i + 1) % pts.length];
-      if ((p0[1] <= y && p1[1] > y) || (p1[1] <= y && p0[1] > y)) {
-        const t = (y - p0[1]) / (p1[1] - p0[1]);
-        xs.push(p0[0] + t * (p1[0] - p0[0]));
+}
+
+// ---------------------------------------------------------------------------
+// 3. The wave band — solid mass between crest and crest + BAND.
+//    Colour runs deep teal at the base to bright cyan at the crest.
+// ---------------------------------------------------------------------------
+for (let x = 0; x < W; x++) {
+  const cy = crestY(x);
+  const by = Math.min(H, cy + BAND);
+  for (let y = Math.max(0, Math.floor(cy)); y < Math.floor(by); y++) {
+    const t = (y - cy) / BAND; // 0 at crest, 1 at base
+    const glow = 1 - t;
+    const r = lerp(64, 8, t) + glow * 30;
+    const g = lerp(214, 62, t) + glow * 18;
+    const b = lerp(232, 96, t) + glow * 10;
+    const i = (y * W + x) * 4;
+    buf[i] = Math.round(clamp(r, 0, 255));
+    buf[i + 1] = Math.round(clamp(g, 0, 255));
+    buf[i + 2] = Math.round(clamp(b, 0, 255));
+    buf[i + 3] = 255;
+  }
+}
+
+// Darken the lower half of the band so the crest reads as a lit edge.
+for (let x = 0; x < W; x++) {
+  const cy = crestY(x);
+  for (let y = Math.floor(cy + BAND * 0.55); y < Math.min(H, Math.floor(cy + BAND)); y++) {
+    const t = (y - (cy + BAND * 0.55)) / (BAND * 0.45);
+    const i = (y * W + x) * 4;
+    const f = 1 - 0.45 * t;
+    buf[i] = Math.round(buf[i] * f);
+    buf[i + 1] = Math.round(buf[i + 1] * f);
+    buf[i + 2] = Math.round(buf[i + 2] * f);
+  }
+}
+
+// Soft shadow cast by the wave onto the sea below its lower edge.
+for (let x = 0; x < W; x++) {
+  const by = Math.min(H, crestY(x) + BAND);
+  for (let d = 0; d < 30 && by + d < H; d++) {
+    const a = 0.15 * (1 - d / 30);
+    for (let xx = x; xx < x + 1; xx++) {
+      blendPx(xx, by + d, 2, 8, 20, a);
+    }
+  }
+}
+
+// Curl barrel: deep teal ring at the tip with a darker hollow, so the wave
+// reads as curling over instead of ending flat.
+disc(846, 316, 132, 36, 170, 200, 0.85);
+disc(872, 344, 92, 10, 52, 84, 0.92);
+disc(872, 344, 92, 16, 90, 130, 0.35);
+// Lit rim: bright discs tracing the upper arc of the curl lip.
+for (let k = 0; k <= 26; k++) {
+  const a = Math.PI + (k / 26) * Math.PI;
+  disc(846 + Math.cos(a) * 128, 316 + Math.sin(a) * 128, 4 + rnd() * 3, 200, 248, 255, 0.45);
+}
+
+// Bright foam edge along the crest.
+for (let x = 0; x < W; x += 3) {
+  const cy = crestY(x);
+  const jitter = (rnd() - 0.5) * 10;
+  const rad = 3 + rnd() * 7;
+  disc(x + (rnd() - 0.5) * 6, cy + jitter, rad, 205, 248, 255, 0.5 + rnd() * 0.25);
+}
+// Extra foam burst where the crest curls.
+for (let i = 0; i < 70; i++) {
+  const a = rnd() * Math.PI * 2;
+  const rr = 50 + rnd() * 90;
+  const x = 846 + Math.cos(a) * rr * 1.15;
+  const y = 316 + Math.sin(a) * rr * 0.7 - 30;
+  disc(x, y, 2 + rnd() * 5, 220, 250, 255, 0.3 + rnd() * 0.3);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Jellyfish — bell dome + trailing tentacles, scattered through the wave.
+// ---------------------------------------------------------------------------
+type JellyColour = [number, number, number];
+function jellyfish(cx: number, cy: number, rad: number, col: JellyColour, glowA: number): void {
+  // Halo first so the bell sits inside its own light.
+  disc(cx, cy, rad * 2.1, col[0], col[1], col[2], glowA * 0.35);
+  disc(cx, cy, rad * 1.35, col[0], col[1], col[2], glowA * 0.5);
+  // Bell: stacked shrinking ellipses, brightest at the crown.
+  const steps = 7;
+  for (let s = 0; s < steps; s++) {
+    const t = s / (steps - 1);
+    const ry = rad * (0.95 - 0.55 * t);
+    const rx = rad * (1.05 - 0.45 * t);
+    const yy = cy - rad * 0.12 + t * rad * 0.28;
+    const mix = 1 - t * 0.55;
+    ellipse(cx, yy, rx, ry, lerp(255, col[0], mix * 0.6), lerp(255, col[1], mix * 0.6), lerp(255, col[2], mix * 0.6), 0.32 + 0.5 * (1 - t));
+  }
+  // Crown highlight.
+  ellipse(cx - rad * 0.18, cy - rad * 0.42, rad * 0.42, rad * 0.2, 255, 255, 255, 0.75);
+  // Tentacles: wavy lines hanging below the bell, fading as they fall.
+  const arms = 6 + Math.floor(rnd() * 3);
+  for (let a = 0; a < arms; a++) {
+    const spread = (a / (arms - 1) - 0.5) * rad * 1.5;
+    const len = rad * (1.3 + rnd() * 1.1);
+    const phase = rnd() * Math.PI * 2;
+    const pts: Array<[number, number]> = [];
+    const n = 9;
+    for (let k = 0; k <= n; k++) {
+      const t = k / n;
+      const sway = Math.sin(t * 3.2 + phase) * rad * 0.22 * t;
+      pts.push([cx + spread * (1 - t * 0.35) + sway, cy + rad * 0.25 + t * len]);
+    }
+    stroke(pts, Math.min(4.5, Math.max(1.5, rad * 0.055)), col[0], col[1], col[2], 0.55);
+  }
+  // Oral arms: two thicker, shorter centre ribbons.
+  for (let a = -1; a <= 1; a += 2) {
+    const pts: Array<[number, number]> = [];
+    const len = rad * 1.1;
+    for (let k = 0; k <= 7; k++) {
+      const t = k / 7;
+      pts.push([cx + a * rad * 0.18 + Math.sin(t * 4 + a) * rad * 0.16 * t, cy + rad * 0.3 + t * len]);
+    }
+    stroke(pts, Math.min(5, Math.max(2, rad * 0.08)), 255, 250, 235, 0.5);
+  }
+}
+
+const CYAN: JellyColour = [110, 232, 248];
+const TEAL: JellyColour = [70, 200, 220];
+const GOLD: JellyColour = [255, 205, 105];
+
+// Scatter small-to-medium jellyfish through the wave band.
+for (let i = 0; i < 42; i++) {
+  const x = 30 + rnd() * 940;
+  const cy = crestY(x);
+  const y = cy + 40 + rnd() * (BAND - 90);
+  const rad = 11 + rnd() * rnd() * 34;
+  const col = rnd() < 0.72 ? CYAN : TEAL;
+  jellyfish(x, y, rad, col, 0.5 + rnd() * 0.3);
+}
+// A few medium gold jellyfish for warm accents inside the wave.
+for (let i = 0; i < 5; i++) {
+  const x = 120 + rnd() * 620;
+  const cy = crestY(x);
+  const y = cy + 60 + rnd() * 160;
+  jellyfish(x, y, 22 + rnd() * 16, GOLD, 0.75);
+}
+
+// HERO gold jellyfish at the curl tip — the single focal point. Smaller and
+// crisper than the first pass so the curl ring and its bell both read.
+jellyfish(812, 348, 64, GOLD, 0.9);
+// Deepen the hero bell with warm gold so it stands out from the teal curl.
+disc(812, 348, 52, 255, 178, 60, 0.28);
+disc(812, 348, 108, 255, 205, 105, 0.10);
+ellipse(812 - 12, 348 - 28, 28, 13, 255, 240, 200, 0.85);
+
+// ---------------------------------------------------------------------------
+// 5. Bioluminescent particles drifting off the wave and over the sea.
+// ---------------------------------------------------------------------------
+for (let i = 0; i < 320; i++) {
+  const x = rnd() * W;
+  const y = 240 + rnd() * 760;
+  const inWave = y > crestY(x) - 30 && y < crestY(x) + BAND + 60;
+  const a = inWave ? 0.35 + rnd() * 0.55 : 0.15 + rnd() * 0.3;
+  const gold = rnd() < 0.25;
+  disc(x, y, 1 + rnd() * 2.4, gold ? 255 : 150, gold ? 210 : 235, gold ? 130 : 255, a);
+  if (rnd() < 0.15) disc(x, y, 5 + rnd() * 4, gold ? 255 : 150, gold ? 210 : 235, 255, a * 0.25);
+}
+
+// ---------------------------------------------------------------------------
+// 6. Lighthouse — tiny red-banded tower on dark rocks, bottom right.
+//    Its smallness against the wave is the scale twist.
+// ---------------------------------------------------------------------------
+// Light beam first (behind the tower, sweeping up-left toward the wave).
+{
+  const lx = 884;
+  const ly = 852;
+  for (let i = 0; i < 160; i++) {
+    const t = i / 160;
+    const bx = lx - t * 430;
+    const by = ly - t * 330 - t * t * 60;
+    const halfW = 6 + t * 90;
+    for (let k = -Math.floor(halfW); k <= Math.floor(halfW); k++) {
+      const fall = 1 - Math.abs(k) / halfW;
+      const beamA = 0.26 * fall * (1 - t * 0.55);
+      blendPx(bx + k, by - 1, 255, 240, 190, beamA);
+      blendPx(bx + k, by, 255, 240, 190, beamA);
+      blendPx(bx + k, by + 1, 255, 240, 190, beamA);
+    }
+  }
+}
+
+// Rocks.
+{
+  const rockPts: Array<[number, number]> = [
+    [770, 1024], [800, 972], [836, 952], [872, 940], [908, 946],
+    [946, 962], [990, 978], [1024, 990], [1024, 1024],
+  ];
+  // Fill the rock silhouette column by column.
+  for (let x = 770; x < W; x++) {
+    let top = 1024;
+    for (let s = 0; s < rockPts.length - 1; s++) {
+      const [ax, ay] = rockPts[s];
+      const [bx, by] = rockPts[s + 1];
+      if (x >= ax && x <= bx) {
+        top = lerp(ay, by, (x - ax) / Math.max(1, bx - ax));
+        break;
       }
     }
-    xs.sort((m, n) => m - n);
-    for (let k = 0; k + 1 < xs.length; k += 2) {
-      const x0 = Math.max(0, Math.ceil(xs[k]));
-      const x1 = Math.min(W - 1, Math.floor(xs[k + 1]));
-      for (let x = x0; x <= x1; x++) px(x, y, c[0], c[1], c[2], a);
-    }
-  }
-}
-
-// Vertical gradient over a rectangle, written straight into the buffer.
-function vgrad(y0: number, y1: number, c0: RGB, c1: RGB): void {
-  for (let y = y0; y < y1; y++) {
-    const t = (y - y0) / Math.max(1, y1 - y0 - 1);
-    const r = lerp(c0[0], c1[0], t);
-    const g = lerp(c0[1], c1[1], t);
-    const b = lerp(c0[2], c1[2], t);
-    const row = y * W * 4;
-    for (let x = 0; x < W; x++) {
-      const i = row + x * 4;
-      img[i] = r;
-      img[i + 1] = g;
-      img[i + 2] = b;
-      img[i + 3] = 255;
-    }
-  }
-}
-
-// ---------- palette ----------
-const SKY_TOP: RGB = [6, 10, 34];
-const SKY_BOT: RGB = [24, 42, 92];
-const SEA_TOP: RGB = [11, 32, 58];
-const SEA_BOT: RGB = [4, 9, 26];
-const WAVE_DEEP: RGB = [10, 58, 92];
-const WAVE_MID: RGB = [23, 117, 158];
-const FOAM: RGB = [174, 233, 255];
-const CYAN: RGB = [127, 240, 255];
-const CYAN_DEEP: RGB = [64, 200, 235];
-const GOLD: RGB = [255, 205, 92];
-const GOLD_CORE: RGB = [255, 240, 190];
-const VIOLET: RGB = [214, 150, 255];
-const WHITE: RGB = [255, 255, 255];
-
-// ---------- 1. sky ----------
-vgrad(0, 640, SKY_TOP, SKY_BOT);
-
-// stars
-for (let i = 0; i < 230; i++) {
-  const x = rr(0, W);
-  const y = rr(0, 600);
-  const r = rr(0.6, 1.9);
-  const a = rr(0.25, 0.95);
-  disc(x, y, r, [235, 240, 255], a);
-}
-// a few bright stars with a sparkle cross
-for (let i = 0; i < 14; i++) {
-  const x = rr(30, 990);
-  const y = rr(20, 420);
-  const l = rr(4, 9);
-  stroke(x - l, y, x + l, y, 1.4, WHITE, 0.85);
-  stroke(x, y - l, x, y + l, 1.4, WHITE, 0.85);
-  disc(x, y, 2.2, WHITE, 0.9);
-}
-
-// ---------- 2. moon ----------
-const MOON: Pt = [792, 148];
-disc(MOON[0], MOON[1], 175, [232, 226, 200], 0.16);
-disc(MOON[0], MOON[1], 54, [244, 236, 212], 1);
-disc(MOON[0] - 16, MOON[1] - 10, 9, [216, 207, 174], 0.4);
-disc(MOON[0] + 14, MOON[1] + 12, 7, [216, 207, 174], 0.35);
-disc(MOON[0] + 20, MOON[1] - 20, 5, [216, 207, 174], 0.3);
-disc(MOON[0] - 4, MOON[1] + 22, 6, [216, 207, 174], 0.3);
-
-// ---------- 3. sea ----------
-vgrad(640, H, SEA_TOP, SEA_BOT);
-// horizon glow
-for (let x = 0; x < W; x += 4) {
-  disc(x, 640, 3, [120, 180, 220], 0.05);
-}
-// moon reflection column
-for (let i = 0; i < 30; i++) {
-  const x = MOON[0] + rr(-75, 75);
-  const y = rr(650, 1000);
-  stroke(x - rr(12, 45), y, x + rr(12, 45), y, 2, [240, 230, 192], rr(0.05, 0.16));
-}
-// sea shimmer streaks
-for (let i = 0; i < 55; i++) {
-  const x = rr(0, W);
-  const y = rr(655, 1000);
-  const len = rr(25, 130);
-  stroke(x - len / 2, y, x + len / 2, y, 2, [143, 216, 234], rr(0.04, 0.12));
-}
-
-// ---------- 4. the wave ----------
-// Crest curve: sweeps from bottom-left up to the curl tip at top-right.
-const C0: Pt = [-60, 1090];
-const C1: Pt = [170, 830];
-const C2: Pt = [520, 540];
-const C3: Pt = [865, 295];
-
-interface CrestPt {
-  x: number;
-  y: number;
-  nx: number; // sky-side normal (unit)
-  ny: number;
-  r: number; // local body radius
-}
-const crest: CrestPt[] = [];
-const N = 50;
-for (let s = 0; s <= N; s++) {
-  const t = s / N;
-  const [x, y] = cubic(C0, C1, C2, C3, t);
-  const [tx, ty] = cubicTan(C0, C1, C2, C3, t);
-  const tl = Math.hypot(tx, ty) || 1;
-  // sky-side normal: (ty, -tx), flipped so it points up
-  let nx = ty / tl;
-  let ny = -tx / tl;
-  if (ny > 0) {
-    nx = -nx;
-    ny = -ny;
-  }
-  const r = (55 + 110 * Math.sin(Math.PI * (0.1 + 0.8 * t))) * (1 - 0.35 * t);
-  crest.push({ x, y, nx, ny, r });
-}
-
-// wave body: overlapping translucent discs along the crest, two layers so the
-// mass reads solid, not like a thin line
-for (const p of crest) {
-  const t = p.y / H;
-  const col = mix(WAVE_DEEP, WAVE_MID, clamp(1 - t, 0, 1));
-  disc(p.x, p.y, p.r, col, 0.72);
-  disc(p.x + p.nx * p.r * 0.25, p.y + p.ny * p.r * 0.25, p.r * 0.62, [79, 200, 232], 0.3);
-  // second layer toward the sea side fills the body out
-  disc(p.x - p.nx * p.r * 0.35, p.y - p.ny * p.r * 0.35, p.r * 0.7, col, 0.5);
-}
-// curl hook: the tip folds back down over itself
-for (const [hx, hy, hr] of [
-  [838, 322, 58],
-  [806, 348, 52],
-  [772, 366, 44],
-  [742, 376, 34],
-] as const) {
-  disc(hx, hy, hr, WAVE_MID, 0.55);
-  disc(hx, hy, hr * 0.55, [79, 200, 232], 0.25);
-}
-// dark tube shadow on the sea-side of the crest (gives the curl depth)
-for (let s = 0; s < crest.length - 1; s++) {
-  const p = crest[s];
-  const q = crest[s + 1];
-  stroke(
-    p.x - p.nx * p.r * 0.5,
-    p.y - p.ny * p.r * 0.5,
-    q.x - q.nx * q.r * 0.5,
-    q.y - q.ny * q.r * 0.5,
-    34,
-    [5, 20, 44],
-    0.32,
-  );
-}
-// bright foam rim along the sky-side edge of the crest, broken into segments
-// so it reads as surf foam, not a laser line
-for (let s = 0; s < crest.length - 1; s++) {
-  if (rand() < 0.22) continue; // gaps in the foam
-  const p = crest[s];
-  const q = crest[s + 1];
-  stroke(
-    p.x + p.nx * p.r * 0.55,
-    p.y + p.ny * p.r * 0.55,
-    q.x + q.nx * q.r * 0.55,
-    q.y + q.ny * q.r * 0.55,
-    8,
-    FOAM,
-    0.55,
-  );
-}
-for (let s = 0; s < crest.length - 1; s++) {
-  if (rand() < 0.35) continue;
-  const p = crest[s];
-  const q = crest[s + 1];
-  stroke(
-    p.x + p.nx * p.r * 0.55,
-    p.y + p.ny * p.r * 0.55,
-    q.x + q.nx * q.r * 0.55,
-    q.y + q.ny * q.r * 0.55,
-    3,
-    WHITE,
-    0.45,
-  );
-}
-// extra foam blobs clinging to the rim
-for (let i = 0; i < 60; i++) {
-  const p = crest[Math.floor(rand() * crest.length)];
-  disc(
-    p.x + p.nx * p.r * 0.55 + rr(-8, 8),
-    p.y + p.ny * p.r * 0.55 + rr(-8, 8),
-    rr(3, 8),
-    FOAM,
-    rr(0.3, 0.6),
-  );
-}
-// foam spray bursting off the rim
-for (let i = 0; i < 130; i++) {
-  const p = crest[Math.floor(rand() * crest.length)];
-  const off = rr(0.45, 0.85) * p.r;
-  const x = p.x + p.nx * off + rr(-14, 14);
-  const y = p.y + p.ny * off + rr(-14, 14);
-  disc(x, y, rr(1.2, 4.2), pick([WHITE, FOAM, CYAN]), rr(0.4, 0.9));
-}
-
-// ---------- 5. jellyfish ----------
-function jellyfish(cx: number, cy: number, r: number, kind: "cyan" | "gold" | "violet", glowA: number): void {
-  const body: RGB = kind === "gold" ? GOLD : kind === "violet" ? VIOLET : CYAN;
-  const core: RGB = kind === "gold" ? GOLD_CORE : [225, 252, 255];
-  const deep: RGB = kind === "gold" ? [214, 140, 40] : kind === "violet" ? [150, 80, 210] : CYAN_DEEP;
-  // halo
-  disc(cx, cy, r * 2.3, body, glowA);
-  // dome
-  ellipse(cx, cy - r * 0.08, r, r * 0.62, deep, 0.9, 0.6);
-  ellipse(cx, cy - r * 0.12, r * 0.82, r * 0.5, body, 0.85, 0.5);
-  // bright core at the dome top
-  ellipse(cx, cy - r * 0.22, r * 0.45, r * 0.26, core, 0.95, 0.6);
-  // rim light along the dome's lower edge
-  for (let a = 0; a <= 24; a++) {
-    const th = (Math.PI * a) / 24;
-    const x = cx + Math.cos(th) * r * 0.92;
-    const y = cy - r * 0.08 + Math.sin(th) * r * 0.55;
-    disc(x, y, 2.2, core, 0.7);
-  }
-  // tentacles: wavy cubic strands hanging down, drifting with the wave flow
-  const count = 5 + Math.floor(rand() * 3);
-  for (let k = 0; k < count; k++) {
-    const spread = (k / (count - 1) - 0.5) * r * 1.5;
-    const sx = cx + spread;
-    const sy = cy + r * 0.42;
-    const len = r * rr(1.5, 2.7);
-    const sway = rr(-26, 26) - r * 0.25; // drift down-left, with the flow
-    const p0: Pt = [sx, sy];
-    const p1: Pt = [sx + sway * 0.3, sy + len * 0.35];
-    const p2: Pt = [sx + sway * 0.8, sy + len * 0.7];
-    const p3: Pt = [sx + sway, sy + len];
-    bezierStroke(p0, p1, p2, p3, 3.4, 1.1, body, 0.75);
-  }
-  // two thicker oral arms
-  for (let k = 0; k < 2; k++) {
-    const sx = cx + (k === 0 ? -r * 0.28 : r * 0.28);
-    const sy = cy + r * 0.4;
-    const len = r * rr(1.1, 1.6);
-    const sway = rr(-14, 14) - r * 0.2;
-    bezierStroke(
-      [sx, sy],
-      [sx + sway * 0.3, sy + len * 0.4],
-      [sx + sway * 0.7, sy + len * 0.75],
-      [sx + sway, sy + len],
-      5.5,
-      2.2,
-      mix(body, WHITE, 0.25),
-      0.8,
-    );
-  }
-}
-
-// small-to-medium jellyfish riding the crest, jittered so the row is not a
-// regular bead chain; sizes grow toward the tip
-for (let i = 0; i < 22; i++) {
-  const t = clamp(0.1 + (i / 21) * 0.85 + rr(-0.035, 0.035), 0.05, 0.97);
-  const idx = Math.min(N, Math.round(t * N));
-  const p = crest[idx];
-  const size = (13 + 34 * Math.pow(t, 1.5) + rr(0, 10)) * (1 - 0.15 * (1 - t));
-  const kind = rand() < 0.68 ? "cyan" : rand() < 0.62 ? "gold" : "violet";
-  jellyfish(
-    p.x + p.nx * (p.r * 0.12 + rr(-16, 16)) + rr(-10, 10),
-    p.y + p.ny * (p.r * 0.12 + rr(-16, 16)) + rr(-10, 10),
-    size,
-    kind,
-    0.16,
-  );
-}
-
-// a few tiny drifters in the open sea and sky for depth
-for (let i = 0; i < 7; i++) {
-  jellyfish(rr(60, 960), rr(660, 980), rr(7, 13), "cyan", 0.1);
-}
-// (no jellyfish drifting loose in the sky — they read as insects at small size)
-
-// ---------- 6. hero jellyfish at the curl tip ----------
-const TIP = crest[N];
-const heroX = TIP.x - 12;
-const heroY = TIP.y - 6;
-disc(heroX, heroY, 270, GOLD, 0.2);
-disc(heroX, heroY, 170, [255, 220, 130], 0.22);
-jellyfish(heroX, heroY, 92, "gold", 0.3);
-// long flowing hero tentacles reaching down toward the lighthouse,
-// wavy and fanned, not straight parallel sticks
-for (let k = 0; k < 3; k++) {
-  const sx = heroX - 45 + k * 42;
-  const sy = heroY + 30;
-  const len = rr(170, 235);
-  const sway = rr(-105, -35);
-  bezierStroke(
-    [sx, sy],
-    [sx + sway * 0.15 + 26, sy + len * 0.3],
-    [sx + sway * 0.75 - 18, sy + len * 0.65],
-    [sx + sway, sy + len],
-    4.2,
-    1.2,
-    GOLD,
-    0.8,
-  );
-}
-// golden sparkles around the hero
-for (let i = 0; i < 40; i++) {
-  const a = rr(0, Math.PI * 2);
-  const d = rr(60, 210);
-  disc(heroX + Math.cos(a) * d, heroY + Math.sin(a) * d * 0.8, rr(1, 3), GOLD_CORE, rr(0.5, 0.95));
-}
-
-// ---------- 7. lighthouse ----------
-// rock
-ellipse(205, 985, 150, 72, [9, 16, 36], 1, 0.9);
-ellipse(205, 965, 120, 42, [13, 24, 50], 1, 0.9);
-// foam at the rock base
-for (let i = 0; i < 34; i++) {
-  disc(205 + rr(-140, 140), 955 + rr(-12, 26), rr(1.5, 4.5), FOAM, rr(0.35, 0.85));
-}
-// tower (trapezoid, white with two red bands)
-const towerTopY = 845;
-const towerBotY = 935;
-const topHalf = 11;
-const botHalf = 20;
-function towerHalfAt(y: number): number {
-  return lerp(topHalf, botHalf, (y - towerTopY) / (towerBotY - towerTopY));
-}
-fillPoly(
-  [
-    [205 - topHalf, towerTopY],
-    [205 + topHalf, towerTopY],
-    [205 + botHalf, towerBotY],
-    [205 - botHalf, towerBotY],
-  ],
-  [236, 231, 217],
-  1,
-);
-// red bands
-for (const [by0, by1] of [
-  [878, 893],
-  [906, 920],
-] as const) {
-  const h0 = towerHalfAt(by0);
-  const h1 = towerHalfAt(by1);
-  fillPoly(
-    [
-      [205 - h0, by0],
-      [205 + h0, by0],
-      [205 + h1, by1],
-      [205 - h1, by1],
-    ],
-    [178, 52, 48],
-    1,
-  );
-}
-// tiny windows
-disc(205, 862, 2.4, [30, 40, 60], 0.9);
-// lamp room + light
-fillPoly(
-  [
-    [192, 838],
-    [218, 838],
-    [218, 848],
-    [192, 848],
-  ],
-  [24, 30, 48],
-  1,
-);
-disc(205, 828, 42, [255, 240, 170], 0.55);
-disc(205, 828, 8, [255, 247, 200], 1);
-// beam sweeping up toward the wave: a soft fan of strokes, no hard edges
-for (let i = 0; i <= 10; i++) {
-  const t = i / 10;
-  stroke(205, 828, 840, lerp(560, 692, t), 14, [255, 233, 168], 0.045);
-}
-
-// ---------- 8. foreground rocks ----------
-ellipse(55, 1015, 200, 62, [7, 13, 30], 1, 0.9);
-ellipse(985, 1022, 180, 58, [7, 13, 30], 1, 0.9);
-ellipse(335, 1002, 85, 30, [9, 16, 34], 1, 0.9);
-
-// ---------- 9. vignette ----------
-for (let y = 0; y < H; y++) {
-  const dy = (y - H / 2) / (H / 2);
-  for (let x = 0; x < W; x++) {
-    const dx = (x - W / 2) / (W / 2);
-    const d2 = dx * dx + dy * dy;
-    if (d2 > 0.55) {
-      const f = 1 - 0.24 * Math.pow((d2 - 0.55) / 0.45, 1.1);
+    for (let y = Math.floor(top); y < H; y++) {
       const i = (y * W + x) * 4;
-      img[i] *= f;
-      img[i + 1] *= f;
-      img[i + 2] *= f;
+      const shade = 0.75 + 0.25 * ((x * 7 + y * 13) % 10) / 10;
+      buf[i] = Math.round(16 * shade);
+      buf[i + 1] = Math.round(22 * shade);
+      buf[i + 2] = Math.round(34 * shade);
+      buf[i + 3] = 255;
+    }
+  }
+  // Wet highlights on the rock edge.
+  for (let i = 0; i < 40; i++) {
+    const x = 790 + rnd() * 220;
+    const y = 950 + rnd() * 60;
+    disc(x, y, 1 + rnd() * 2, 140, 210, 235, 0.25 + rnd() * 0.3);
+  }
+}
+
+// Tower: white, tapering, with one red band, gallery, and lamp.
+{
+  const baseY = 948;
+  const topY = 846;
+  const cx = 884;
+  for (let y = topY; y <= baseY; y++) {
+    const t = (y - topY) / (baseY - topY);
+    const halfW = lerp(13, 20, t);
+    const redBand = y > 892 && y < 916;
+    for (let x = Math.floor(cx - halfW); x <= Math.ceil(cx + halfW); x++) {
+      const i = (y * W + x) * 4;
+      if (redBand) {
+        buf[i] = 198; buf[i + 1] = 52; buf[i + 2] = 48;
+      } else {
+        const shade = 232 - Math.round(30 * Math.abs(x - cx) / halfW);
+        buf[i] = shade; buf[i + 1] = shade; buf[i + 2] = Math.round(shade * 0.96);
+      }
+      buf[i + 3] = 255;
+    }
+  }
+  // Gallery platform + railing.
+  for (let x = cx - 20; x <= cx + 20; x++) {
+    const i = (846 * W + x) * 4;
+    buf[i] = 40; buf[i + 1] = 44; buf[i + 2] = 56; buf[i + 3] = 255;
+  }
+  // Lamp room + warm lamp glow.
+  disc(cx, 832, 26, 255, 214, 130, 0.35);
+  disc(cx, 832, 12, 255, 226, 150, 0.95);
+  for (let x = cx - 9; x <= cx + 9; x++) {
+    for (let y = 822; y <= 842; y++) {
+      const i = (y * W + x) * 4;
+      buf[i] = 255; buf[i + 1] = 214; buf[i + 2] = 130; buf[i + 3] = 255;
+    }
+  }
+  // Roof cap.
+  for (let x = cx - 12; x <= cx + 12; x++) {
+    const i = (818 * W + x) * 4;
+    buf[i] = 52; buf[i + 1] = 56; buf[i + 2] = 72; buf[i + 3] = 255;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Vignette — gentle darkening at the corners to hold the focal point.
+// ---------------------------------------------------------------------------
+{
+  const ccx = W / 2;
+  const ccy = H / 2;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const d = Math.hypot(x - ccx, y - ccy) / 724;
+      const f = 1 - 0.16 * smoothstep(0.55, 1.05, d);
+      const i = (y * W + x) * 4;
+      buf[i] = Math.round(buf[i] * f);
+      buf[i + 1] = Math.round(buf[i + 1] * f);
+      buf[i + 2] = Math.round(buf[i + 2] * f);
     }
   }
 }
 
-// ---------- PNG encoder (hand-written CRC32 + chunks) ----------
+// ---------------------------------------------------------------------------
+// PNG encoding — implemented by hand: CRC32, chunks, zlib deflate.
+// Per-row filter choice (None vs Up) by smallest absolute byte sum.
+// ---------------------------------------------------------------------------
 const CRC_TABLE = new Uint32Array(256);
 for (let n = 0; n < 256; n++) {
   let c = n;
   for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
   CRC_TABLE[n] = c >>> 0;
 }
-function crc32(buf: Buffer): number {
+function crc32(data: Buffer): number {
   let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) {
-    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  for (let i = 0; i < data.length; i++) {
+    c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
   }
   return (c ^ 0xffffffff) >>> 0;
 }
-function pngChunk(type: string, data: Buffer): Buffer {
+function chunk(type: string, data: Buffer): Buffer {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);
-  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const typeBuf = Buffer.from(type, "ascii");
   const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(body), 0);
-  return Buffer.concat([len, body, crc]);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([len, typeBuf, data, crc]);
 }
-function encodePNG(): Buffer {
-  const raw = Buffer.alloc(H * (1 + W * 4));
+
+function encodePng(): Buffer {
+  const stride = W * 4;
+  const raw = Buffer.alloc((stride + 1) * H);
+  const prev = Buffer.alloc(stride);
   for (let y = 0; y < H; y++) {
-    raw[y * (1 + W * 4)] = 0; // filter: none
-    raw.set(img.subarray(y * W * 4, (y + 1) * W * 4), y * (1 + W * 4) + 1);
+    const rowStart = y * stride;
+    const row = Buffer.from(buf.buffer, buf.byteOffset + rowStart, stride);
+    // Filter 0 (None) candidate.
+    let sum0 = 0;
+    for (let i = 0; i < stride; i++) {
+      const v = row[i];
+      sum0 += v < 128 ? v : 256 - v;
+    }
+    // Filter 2 (Up) candidate.
+    let sum2 = 0;
+    for (let i = 0; i < stride; i++) {
+      const v = (row[i] - prev[i] + 256) & 0xff;
+      sum2 += v < 128 ? v : 256 - v;
+    }
+    const off = y * (stride + 1);
+    if (sum2 < sum0) {
+      raw[off] = 2;
+      for (let i = 0; i < stride; i++) raw[off + 1 + i] = (row[i] - prev[i] + 256) & 0xff;
+    } else {
+      raw[off] = 0;
+      row.copy(raw, off + 1);
+    }
+    row.copy(prev);
   }
-  const idat = zlib.deflateSync(raw, { level: 9 });
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(W, 0);
   ihdr.writeUInt32BE(H, 4);
   ihdr[8] = 8; // bit depth
-  ihdr[9] = 6; // color type RGBA
-  ihdr[10] = 0;
-  ihdr[11] = 0;
-  ihdr[12] = 0;
+  ihdr[9] = 6; // colour type RGBA
+  ihdr[10] = 0; // compression
+  ihdr[11] = 0; // filter
+  ihdr[12] = 0; // interlace
+  const idat = deflateSync(raw, { level: 9 });
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    pngChunk("IHDR", ihdr),
-    pngChunk("IDAT", idat),
-    pngChunk("IEND", Buffer.alloc(0)),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", idat),
+    chunk("IEND", Buffer.alloc(0)),
   ]);
 }
 
 const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-fs.mkdirSync(outDir, { recursive: true });
-const png = encodePNG();
-const outPath = path.join(outDir, "entry.png");
-fs.writeFileSync(outPath, png);
-console.log(`wrote ${outPath} (${png.length} bytes, ${W}x${H})`);
+mkdirSync(outDir, { recursive: true });
+const png = encodePng();
+writeFileSync(join(outDir, "entry.png"), png);
+console.log(`wrote ${join(outDir, "entry.png")} (${png.length} bytes, ${W}x${H})`);
